@@ -45,7 +45,7 @@ class RealTimeFFT(QMainWindow):
         self.max_power_plot_widget.setLabel('bottom', 'Time (s)')
         self.max_power_plot_widget.setLabel('left', 'Power (dB)')
         self.max_power_plot_widget.showGrid(x=True, y=True)
-        self.max_power_plot_widget.setYRange(-100, 0)  # Adjust based on expected dB range
+        self.max_power_plot_widget.setYRange(-100, 0)
         self.max_power_plot = self.max_power_plot_widget.plot([], [], pen='b')
         self.max_power_hover_label = QLabel("Time: N/A, Power: N/A dB")
         self.max_power_container.addWidget(self.max_power_plot_widget)
@@ -131,16 +131,31 @@ class RealTimeFFT(QMainWindow):
         self.current_freqs = []
         self.current_magnitude_db = []
 
-        # Lists to store vertical lines on FFT and Max Power plots
-        self.fft_lines = []
-        self.max_power_lines = []  # New list for lines on Max Power plot
+        # Lists to store vertical lines, their labels, and highlighted X-axis ticks on all plots
+        self.fft_lines = []  # (line, label, tick)
+        self.max_power_lines = []  # (line, label, tick)
+        self.max_freq_lines = []  # (line, label, tick)
+
+        # Store original X-axis tick styles to restore them
+        self.fft_original_ticks = None
+        self.max_power_original_ticks = None
+        self.max_freq_original_ticks = None
 
         # Load audio file after initializing all variables
         self.load_audio_file(self.audio_file)
 
+        # Store original X-axis tick styles after loading the file
+        self.fft_original_ticks = (self.fft_plot_widget.getAxis('bottom').style.get('tickFont'), 
+                                   self.fft_plot_widget.getAxis('bottom').tickPen())
+        self.max_power_original_ticks = (self.max_power_plot_widget.getAxis('bottom').style.get('tickFont'), 
+                                         self.max_power_plot_widget.getAxis('bottom').tickPen())
+        self.max_freq_original_ticks = (self.max_freq_plot_widget.getAxis('bottom').style.get('tickFont'), 
+                                        self.max_freq_plot_widget.getAxis('bottom').tickPen())
+
         # Enable hover and click functionality
         self.fft_plot_widget.scene().sigMouseMoved.connect(self.on_fft_mouse_moved)
         self.max_power_plot_widget.scene().sigMouseMoved.connect(self.on_max_power_mouse_moved)
+        self.max_power_plot_widget.scene().sigMouseClicked.connect(self.on_max_power_mouse_clicked)
         self.max_freq_plot_widget.scene().sigMouseMoved.connect(self.on_max_freq_mouse_moved)
         self.max_freq_plot_widget.scene().sigMouseClicked.connect(self.on_max_freq_mouse_clicked)
 
@@ -149,19 +164,22 @@ class RealTimeFFT(QMainWindow):
 
     def setup_menus(self):
         """Set up the menu bar with File and Tools menus."""
-        # File menu
         file_menu = self.menu_bar.addMenu("File")
         open_action = QAction("Open WAV File", self)
         open_action.setShortcut("Ctrl+O")
         open_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_action)
 
-        # Tools menu
         tools_menu = self.menu_bar.addMenu("Tools")
         self.advanced_action = QAction("Advanced Mode", self, checkable=True)
         self.advanced_action.setShortcut("A")
         self.advanced_action.triggered.connect(self.toggle_advanced_mode)
         tools_menu.addAction(self.advanced_action)
+
+        reset_action = QAction("Reset Views", self)
+        reset_action.setShortcut("R")
+        reset_action.triggered.connect(self.reset_views)
+        tools_menu.addAction(reset_action)
 
     def open_file_dialog(self):
         """Open a file dialog to select a WAV file and reload the audio."""
@@ -172,24 +190,44 @@ class RealTimeFFT(QMainWindow):
 
     def load_audio_file(self, file_path):
         """Load the audio file and update the plots and controls."""
-        # Stop any ongoing playback
         if self.is_playing:
             if self.advanced_mode:
                 self.toggle_play_pause_advanced()
             else:
                 self.toggle_play_pause()
 
-        # Clear existing data
         self.max_freqs = []
         self.max_powers = []
         self.timestamps = []
-        self.fft_lines = []
-        self.max_power_lines = []
+        for line, label, tick in self.fft_lines:
+            self.fft_plot_widget.removeItem(line)
+            self.fft_plot_widget.removeItem(label)
+        for line, label, tick in self.max_power_lines:
+            self.max_power_plot_widget.removeItem(line)
+            self.max_power_plot_widget.removeItem(label)
+        for line, label, tick in self.max_freq_lines:
+            self.max_freq_plot_widget.removeItem(line)
+            self.max_freq_plot_widget.removeItem(label)
+        self.fft_lines.clear()
+        self.max_power_lines.clear()
+        self.max_freq_lines.clear()
         self.fft_plot.clear()
         self.max_power_plot.clear()
         self.max_freq_plot.clear()
 
-        # Read audio file
+        if self.fft_original_ticks:
+            font, pen = self.fft_original_ticks
+            self.fft_plot_widget.getAxis('bottom').setTickFont(font)
+            self.fft_plot_widget.getAxis('bottom').setTickPen(pen)
+        if self.max_power_original_ticks:
+            font, pen = self.max_power_original_ticks
+            self.max_power_plot_widget.getAxis('bottom').setTickFont(font)
+            self.max_power_plot_widget.getAxis('bottom').setTickPen(pen)
+        if self.max_freq_original_ticks:
+            font, pen = self.max_freq_original_ticks
+            self.max_freq_plot_widget.getAxis('bottom').setTickFont(font)
+            self.max_freq_plot_widget.getAxis('bottom').setTickPen(pen)
+
         try:
             self.sample_rate, self.data = wavfile.read(file_path)
         except Exception as e:
@@ -200,24 +238,22 @@ class RealTimeFFT(QMainWindow):
             self.data = self.data[:, 0]
         self.data = self.data / np.max(np.abs(self.data))  # Normalize
 
-        # Set slider range after initializing self.data (in centiseconds)
         self.total_duration = len(self.data) / self.sample_rate
         self.slider.setRange(0, int(self.total_duration * 100))  # Centiseconds
-        self.end_time_input.setText(f"{self.total_duration:.2f}")  # Update default end time
+        self.end_time_input.setText(f"{self.total_duration:.2f}")
+
+        self.max_power_plot_widget.setXRange(0, self.total_duration)
+        self.max_freq_plot_widget.setXRange(0, self.total_duration)
 
         self.start_idx = 0
         self.is_playing = False
         self.playback_start_idx = 0
-        self.playback_end_idx = len(self.data)  # Default to full range
+        self.playback_end_idx = len(self.data)
 
-        # Store current FFT data for hover functionality
         self.current_freqs = []
         self.current_magnitude_db = []
 
-        # Compute max frequencies and powers
         self.compute_max_frequencies()
-
-        # Reset time label and FFT plot
         self.update_time_label_and_fft(0)
 
     def compute_max_frequencies(self):
@@ -285,62 +321,122 @@ class RealTimeFFT(QMainWindow):
             else:
                 self.max_freq_hover_label.setText("Time: N/A, Freq: N/A Hz")
 
+    def on_max_power_mouse_clicked(self, event):
+        """Handle mouse click on the Max Power plot."""
+        if event.button() == Qt.LeftButton and not event.double():
+            pos = event.scenePos()
+            if self.max_power_plot_widget.sceneBoundingRect().contains(pos):
+                mouse_point = self.max_power_plot_widget.getViewBox().mapSceneToView(pos)
+                x = mouse_point.x()
+                if self.timestamps and self.max_powers and self.max_freqs:
+                    idx = np.argmin(np.abs(np.array(self.timestamps) - x))
+                    selected_time = self.timestamps[idx]
+                    selected_power = self.max_powers[idx]
+                    selected_freq = self.max_freqs[idx]
+                    self.add_line_to_plots(selected_time, selected_freq, selected_power)
+
     def on_max_freq_mouse_clicked(self, event):
         """Handle mouse click on the Max Freq plot."""
-        if event.button() == Qt.LeftButton:  # Left click to add a line
+        if event.button() == Qt.LeftButton and not event.double():
             pos = event.scenePos()
             if self.max_freq_plot_widget.sceneBoundingRect().contains(pos):
                 mouse_point = self.max_freq_plot_widget.getViewBox().mapSceneToView(pos)
                 x = mouse_point.x()
-                if self.timestamps and self.max_freqs:
+                if self.timestamps and self.max_freqs and self.max_powers:
                     idx = np.argmin(np.abs(np.array(self.timestamps) - x))
-                    selected_freq = self.max_freqs[idx]
                     selected_time = self.timestamps[idx]
-                    # Add a vertical line to the FFT plot (frequency on X-axis)
-                    fft_line = pg.InfiniteLine(pos=selected_freq, angle=90, pen='r')
-                    self.fft_plot_widget.addItem(fft_line)
-                    self.fft_lines.append(fft_line)
-                    # Add a vertical line to the Max Power plot (time on X-axis)
-                    power_line = pg.InfiniteLine(pos=selected_time, angle=90, pen='r')
-                    self.max_power_plot_widget.addItem(power_line)
-                    self.max_power_lines.append(power_line)
+                    selected_freq = self.max_freqs[idx]
+                    selected_power = self.max_powers[idx]
+                    self.add_line_to_plots(selected_time, selected_freq, selected_power)
+
+    def add_line_to_plots(self, selected_time, selected_freq, selected_power):
+        """Add a vertical line to all plots with Y-axis value labels, without modifying X-axis ticks."""
+        # FFT plot (frequency on X-axis, show magnitude at selected frequency)
+        fft_line = pg.InfiniteLine(pos=selected_freq, angle=90, pen='r')
+        self.fft_plot_widget.addItem(fft_line)
+        fft_idx = np.argmin(np.abs(np.array(self.current_freqs) - selected_freq))
+        fft_mag = self.current_magnitude_db[fft_idx] if len(self.current_magnitude_db) > fft_idx else 0
+        fft_label = pg.TextItem(f"{fft_mag:.2f} dB", anchor=(0, 1), color='r')
+        fft_label.setPos(selected_freq, fft_mag)
+        self.fft_plot_widget.addItem(fft_label)
+        # Store without tick value since we’re not highlighting
+        self.fft_lines.append((fft_line, fft_label, None))
+
+        # Max Power plot (time on X-axis, show power)
+        power_line = pg.InfiniteLine(pos=selected_time, angle=90, pen='r')
+        self.max_power_plot_widget.addItem(power_line)
+        power_label = pg.TextItem(f"{selected_power:.2f} dB", anchor=(0, 1), color='r')
+        power_label.setPos(selected_time, selected_power)
+        self.max_power_plot_widget.addItem(power_label)
+        self.max_power_lines.append((power_line, power_label, None))
+
+        # Max Freq plot (time on X-axis, show frequency)
+        freq_line = pg.InfiniteLine(pos=selected_time, angle=90, pen='r')
+        self.max_freq_plot_widget.addItem(freq_line)
+        freq_label = pg.TextItem(f"{selected_freq:.2f} Hz", anchor=(0, 1), color='r')
+        freq_label.setPos(selected_time, selected_freq)
+        self.max_freq_plot_widget.addItem(freq_label)
+        self.max_freq_lines.append((freq_line, freq_label, None))
+
+    def reset_views(self):
+        """Reset the views of all plots to their initial ranges."""
+        self.fft_plot_widget.setXRange(0, 22500)
+        self.fft_plot_widget.setYRange(-100, 0)
+        self.max_power_plot_widget.setXRange(0, self.total_duration)
+        self.max_power_plot_widget.setYRange(-100, 0)
+        self.max_freq_plot_widget.setXRange(0, self.total_duration)
+        self.max_freq_plot_widget.setYRange(0, 22500)
 
     def keyPressEvent(self, event):
         """Handle key press events."""
-        if event.key() == Qt.Key_A:  # Toggle Advanced Mode with 'A'
+        if event.key() == Qt.Key_A:
             self.toggle_advanced_mode()
-        elif event.key() == Qt.Key_Space:  # Play/Pause with Spacebar
+        elif event.key() == Qt.Key_Space:
             if self.advanced_mode:
                 self.toggle_play_pause_advanced()
             else:
                 self.toggle_play_pause()
-        elif event.key() == Qt.Key_Delete:  # Delete key to remove all lines
-            # Remove lines from FFT plot
-            for line in self.fft_lines:
+        elif event.key() == Qt.Key_R:
+            self.reset_views()
+        elif event.key() == Qt.Key_Delete:
+            for line, label, _ in self.fft_lines:  # Ignore tick value
                 self.fft_plot_widget.removeItem(line)
+                self.fft_plot_widget.removeItem(label)
+            font, pen = self.fft_original_ticks
+            self.fft_plot_widget.getAxis('bottom').setTickFont(font)
+            self.fft_plot_widget.getAxis('bottom').setTickPen(pen)
             self.fft_lines.clear()
-            # Remove lines from Max Power plot
-            for line in self.max_power_lines:
+
+            for line, label, _ in self.max_power_lines:
                 self.max_power_plot_widget.removeItem(line)
+                self.max_power_plot_widget.removeItem(label)
+            font, pen = self.max_power_original_ticks
+            self.max_power_plot_widget.getAxis('bottom').setTickFont(font)
+            self.max_power_plot_widget.getAxis('bottom').setTickPen(pen)
             self.max_power_lines.clear()
+
+            for line, label, _ in self.max_freq_lines:
+                self.max_freq_plot_widget.removeItem(line)
+                self.max_freq_plot_widget.removeItem(label)
+            font, pen = self.max_freq_original_ticks
+            self.max_freq_plot_widget.getAxis('bottom').setTickFont(font)
+            self.max_freq_plot_widget.getAxis('bottom').setTickPen(pen)
+            self.max_freq_lines.clear()
 
     def toggle_advanced_mode(self):
         """Toggle between normal and advanced mode."""
         self.advanced_mode = not self.advanced_mode
-        self.advanced_action.setChecked(self.advanced_mode)  # Update menu checkbox
-        # Clear current layout
+        self.advanced_action.setChecked(self.advanced_mode)
         while self.controls_layout.count():
             item = self.controls_layout.takeAt(0)
             if item.widget():
                 widget = item.widget()
                 self.controls_layout.removeWidget(widget)
-                widget.setParent(None)  # Properly remove the widget
-        # Add the appropriate controls
+                widget.setParent(None)
         if self.advanced_mode:
             self.controls_layout.addWidget(self.advanced_controls_widget)
             print("Switched to Advanced Mode")
         else:
-            # Reset playback range to full audio when switching back to normal mode
             self.playback_start_idx = 0
             self.playback_end_idx = len(self.data)
             self.start_idx = 0
@@ -359,7 +455,7 @@ class RealTimeFFT(QMainWindow):
             self.playback_start_idx = int(start_time * self.sample_rate)
             self.playback_end_idx = int(end_time * self.sample_rate)
             self.start_idx = self.playback_start_idx
-            self.update_time_label_and_fft(int(start_time * 100))  # Update to start time
+            self.update_time_label_and_fft(int(start_time * 100))
             print(f"Playback range set: {start_time:.2f}s to {end_time:.2f}s")
         except ValueError:
             print("Invalid input. Please enter valid numbers for start and end times.")
@@ -445,23 +541,20 @@ class RealTimeFFT(QMainWindow):
 
     def seek_audio(self):
         """Seek to a position in Normal Mode using the slider."""
-        value = self.slider.value()  # Valor en centisegundos
-        self.start_idx = int((value / 100) * self.sample_rate)  # Convertir a muestras
+        value = self.slider.value()
+        self.start_idx = int((value / 100) * self.sample_rate)
         self.update_time_label_and_fft(value)
         if self.is_playing:
-            self.toggle_play_pause()  # Pause if playing
-            self.toggle_play_pause()  # Resume playing
+            self.toggle_play_pause()
+            self.toggle_play_pause()
 
     def update_time_label_and_fft(self, value=None):
         """Update the time label and FFT plot."""
         if value is None:
-            # Convertir muestras a segundos con precisión de centisegundos
             current_time = self.start_idx / self.sample_rate
         else:
-            # Valor del slider en centisegundos
             current_time = value / 100
 
-        # Calcular minutos, segundos y centisegundos
         minutes = int(current_time // 60)
         seconds = int(current_time % 60)
         centiseconds = int((current_time * 100) % 100)
@@ -471,7 +564,6 @@ class RealTimeFFT(QMainWindow):
         else:
             self.time_label.setText(time_text)
 
-        # Actualizar FFT plot al instante indicado
         self.start_idx = int(current_time * self.sample_rate)
         positive_freqs, magnitude_db = self.compute_fft_at_position(self.start_idx)
         self.fft_plot.setData(positive_freqs, magnitude_db)
@@ -483,10 +575,8 @@ class RealTimeFFT(QMainWindow):
         try:
             positive_freqs, magnitude_db = self.queue.get_nowait()
             self.fft_plot.setData(positive_freqs, magnitude_db)
-            # Store current data for hover functionality
             self.current_freqs = positive_freqs
             self.current_magnitude_db = magnitude_db
-            # Actualizar slider con tiempo en centisegundos
             current_time_cs = int((self.start_idx / self.sample_rate) * 100)
             if not self.advanced_mode:
                 self.slider.setValue(current_time_cs)
@@ -505,9 +595,9 @@ class RealTimeFFT(QMainWindow):
             self.stream.close()
         super().closeEvent(event)
 
-# Main function
 if __name__ == "__main__":
     import sys
+    from PyQt5.QtGui import QFont
     app = QApplication(sys.argv)
     window = RealTimeFFT()
     window.show()
